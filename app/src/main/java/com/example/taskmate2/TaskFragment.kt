@@ -25,6 +25,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import androidx.activity.result.contract.ActivityResultContracts
 import android.Manifest
+import android.app.AlarmManager
 import android.app.DatePickerDialog
 import android.app.NotificationChannel
 import android.app.TimePickerDialog
@@ -110,33 +111,25 @@ class TaskFragment : Fragment() {
         return view
     }
 
+
     private fun showAddTaskDialog() {
         val dialogView = LayoutInflater.from(requireContext()).inflate(R.layout.dialog_add_task, null)
         val taskNameInput = dialogView.findViewById<EditText>(R.id.task_name_input)
         val taskDateInput = dialogView.findViewById<EditText>(R.id.task_date_input)
         val taskTimeInput = dialogView.findViewById<EditText>(R.id.task_time_input)
 
-        // Date Picker
         taskDateInput.setOnClickListener {
             val calendar = Calendar.getInstance()
-            val year = calendar.get(Calendar.YEAR)
-            val month = calendar.get(Calendar.MONTH)
-            val day = calendar.get(Calendar.DAY_OF_MONTH)
-
-            DatePickerDialog(requireContext(), { _, selectedYear, selectedMonth, selectedDay ->
-                taskDateInput.setText("$selectedYear-${selectedMonth + 1}-$selectedDay")
-            }, year, month, day).show()
+            DatePickerDialog(requireContext(), { _, year, month, day ->
+                taskDateInput.setText("$year-${month + 1}-$day")
+            }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH), calendar.get(Calendar.DAY_OF_MONTH)).show()
         }
 
-        // Time Picker
         taskTimeInput.setOnClickListener {
             val calendar = Calendar.getInstance()
-            val hour = calendar.get(Calendar.HOUR_OF_DAY)
-            val minute = calendar.get(Calendar.MINUTE)
-
-            TimePickerDialog(requireContext(), { _, selectedHour, selectedMinute ->
-                taskTimeInput.setText(String.format("%02d:%02d", selectedHour, selectedMinute))
-            }, hour, minute, true).show()
+            TimePickerDialog(requireContext(), { _, hour, minute ->
+                taskTimeInput.setText(String.format("%02d:%02d", hour, minute))
+            }, calendar.get(Calendar.HOUR_OF_DAY), calendar.get(Calendar.MINUTE), true).show()
         }
 
         AlertDialog.Builder(requireContext())
@@ -152,7 +145,7 @@ class TaskFragment : Fragment() {
                     ongoingTasks.add(newTask)
                     saveTasks(ONGOING_TASKS_KEY, ongoingTasks)
                     ongoingTaskAdapter.notifyItemInserted(ongoingTasks.size - 1)
-                    updateAppWidget() // Update widget when a new task is added
+                    scheduleNotification(newTask)
                 } else {
                     Toast.makeText(requireContext(), "Please fill all fields", Toast.LENGTH_SHORT).show()
                 }
@@ -160,6 +153,44 @@ class TaskFragment : Fragment() {
             .setNegativeButton("Cancel", null)
             .show()
     }
+
+    private fun scheduleNotification(task: Task) {
+        val alarmManager = requireContext().getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(requireContext(), TaskReminderReceiver::class.java).apply {
+            putExtra("task_name", task.name)
+            putExtra("task_description", "You have a task to complete.")
+        }
+
+        val calendar = Calendar.getInstance().apply {
+            time = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).parse("${task.date} ${task.time}")
+        }
+
+        if (calendar.timeInMillis > System.currentTimeMillis()) {
+            val pendingIntent = PendingIntent.getBroadcast(
+                requireContext(), System.currentTimeMillis().toInt(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    if (alarmManager.canScheduleExactAlarms()) {
+                        alarmManager.setExact(AlarmManager.RTC_WAKEUP, calendar.timeInMillis, pendingIntent)
+                    } else {
+                        alarmManager.set(AlarmManager.RTC_WAKEUP, calendar.timeInMillis, pendingIntent) // Use inexact alarm
+                        Toast.makeText(requireContext(), "New Task added.", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    alarmManager.setExact(AlarmManager.RTC_WAKEUP, calendar.timeInMillis, pendingIntent)
+                }
+            } catch (e: SecurityException) {
+                Toast.makeText(requireContext(), "New Task added(E).", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(requireContext(), "Task time is in the past!", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+
+
 
     private fun loadTasks(key: String): List<Task> {
         val tasksJson = prefs.getString(key, "[]")
@@ -195,7 +226,6 @@ class TaskFragment : Fragment() {
         prefs.edit().putString(key, jsonArray.toString()).apply()
     }
 
-
     private fun handleTaskAction(task: Task, action: TaskAdapter.Action) {
         when (action) {
             TaskAdapter.Action.DONE -> {
@@ -222,94 +252,41 @@ class TaskFragment : Fragment() {
                     saveTasks(COMPLETED_TASKS_KEY, completedTasks)
                     completedTaskAdapter.notifyItemRemoved(taskIndex)
                     ongoingTaskAdapter.notifyItemInserted(ongoingTasks.size - 1)
-                    updateAppWidget() // Update widget after unmarking a task
+                    updateAppWidget() // Update widget after undoing a task
                 }
             }
             TaskAdapter.Action.DELETE -> {
                 confirmAction("Delete task?") {
+                    val taskIndex = if (task.isCompleted) {
+                        completedTasks.indexOf(task)
+                    } else {
+                        ongoingTasks.indexOf(task)
+                    }
+
                     if (task.isCompleted) {
-                        val taskIndex = completedTasks.indexOf(task)
                         completedTasks.remove(task)
+                        saveTasks(COMPLETED_TASKS_KEY, completedTasks)
                         completedTaskAdapter.notifyItemRemoved(taskIndex)
                     } else {
-                        val taskIndex = ongoingTasks.indexOf(task)
                         ongoingTasks.remove(task)
+                        saveTasks(ONGOING_TASKS_KEY, ongoingTasks)
                         ongoingTaskAdapter.notifyItemRemoved(taskIndex)
                     }
-                    saveTasks(ONGOING_TASKS_KEY, ongoingTasks)
-                    saveTasks(COMPLETED_TASKS_KEY, completedTasks)
+
                     updateAppWidget() // Update widget after deleting a task
                 }
             }
-            TaskAdapter.Action.EDIT -> {
-                showEditTaskDialog(task)
+            else -> {
+                // Handle any unexpected cases
+                Toast.makeText(requireContext(), "Unknown action", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
-    private fun showEditTaskDialog(task: Task) {
-        val dialogView = LayoutInflater.from(requireContext()).inflate(R.layout.dialog_add_task, null)
-        val taskNameInput = dialogView.findViewById<EditText>(R.id.task_name_input)
-        val taskDateInput = dialogView.findViewById<EditText>(R.id.task_date_input)
-        val taskTimeInput = dialogView.findViewById<EditText>(R.id.task_time_input)
-
-        // Populate existing task data
-        taskNameInput.setText(task.name)
-        taskDateInput.setText(task.date)
-        taskTimeInput.setText(task.time)
-
-        // Date Picker
-        taskDateInput.setOnClickListener {
-            val calendar = Calendar.getInstance()
-            val year = calendar.get(Calendar.YEAR)
-            val month = calendar.get(Calendar.MONTH)
-            val day = calendar.get(Calendar.DAY_OF_MONTH)
-
-            DatePickerDialog(requireContext(), { _, selectedYear, selectedMonth, selectedDay ->
-                taskDateInput.setText("$selectedYear-${selectedMonth + 1}-$selectedDay")
-            }, year, month, day).show()
-        }
-
-        // Time Picker
-        taskTimeInput.setOnClickListener {
-            val calendar = Calendar.getInstance()
-            val hour = calendar.get(Calendar.HOUR_OF_DAY)
-            val minute = calendar.get(Calendar.MINUTE)
-
-            TimePickerDialog(requireContext(), { _, selectedHour, selectedMinute ->
-                taskTimeInput.setText(String.format("%02d:%02d", selectedHour, selectedMinute))
-            }, hour, minute, true).show()
-        }
-
-        AlertDialog.Builder(requireContext())
-            .setTitle("Edit Task")
-            .setView(dialogView)
-            .setPositiveButton("Save") { _, _ ->
-                val updatedTaskName = taskNameInput.text.toString()
-                val updatedTaskDate = taskDateInput.text.toString()
-                val updatedTaskTime = taskTimeInput.text.toString()
-
-                if (updatedTaskName.isNotEmpty() && updatedTaskDate.isNotEmpty() && updatedTaskTime.isNotEmpty()) {
-                    task.name = updatedTaskName
-                    task.date = updatedTaskDate
-                    task.time = updatedTaskTime
-
-                    // Save updated tasks
-                    saveTasks(ONGOING_TASKS_KEY, ongoingTasks)
-                    ongoingTaskAdapter.notifyDataSetChanged() // Refresh adapter
-                    updateAppWidget() // Update widget after editing
-                } else {
-                    Toast.makeText(requireContext(), "Please fill all fields", Toast.LENGTH_SHORT).show()
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun confirmAction(message: String, onConfirm: () -> Unit) {
+    private fun confirmAction(message: String, onConfirmed: () -> Unit) {
         AlertDialog.Builder(requireContext())
             .setMessage(message)
-            .setPositiveButton("Yes") { _, _ -> onConfirm() }
+            .setPositiveButton("Yes") { _, _ -> onConfirmed() }
             .setNegativeButton("No", null)
             .show()
     }
@@ -318,33 +295,33 @@ class TaskFragment : Fragment() {
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
         ongoingTasks.forEach { task ->
             if (task.date == today) {
-                // Notify user or perform an action
-                sendNotification(task)
+                showNotification(task)
             }
         }
     }
 
-    private fun sendNotification(task: Task) {
-        val notificationManager = requireContext().getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val notificationChannelId = "task_notifications"
+    private fun showNotification(task: Task) {
+        val notificationManager = ContextCompat.getSystemService(requireContext(), NotificationManager::class.java)
+        val notificationId = System.currentTimeMillis().toInt()
+        val channelId = "task_reminder"
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(notificationChannelId, "Task Notifications", NotificationManager.IMPORTANCE_HIGH)
-            notificationManager.createNotificationChannel(channel)
+            val channel = NotificationChannel(channelId, "Task Reminder", NotificationManager.IMPORTANCE_HIGH)
+            notificationManager?.createNotificationChannel(channel)
         }
 
-        val notificationIntent = Intent(requireContext(), MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(requireContext(), 0, notificationIntent, PendingIntent.FLAG_UPDATE_CURRENT)
+        val intent = Intent(requireContext(), MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(requireContext(), notificationId, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
-        val notification = NotificationCompat.Builder(requireContext(), notificationChannelId)
-            .setContentTitle("Task Reminder")
-            .setContentText("Don't forget: ${task.name} at ${task.time}!")
+        val notification = NotificationCompat.Builder(requireContext(), channelId)
             .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Task Reminder")
+            .setContentText(task.name)
             .setContentIntent(pendingIntent)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
             .build()
 
-        notificationManager.notify(task.id.hashCode(), notification)
+        notificationManager?.notify(notificationId, notification)
     }
 
     private fun vibratePhone() {
@@ -358,7 +335,9 @@ class TaskFragment : Fragment() {
 
     private fun updateAppWidget() {
         val appWidgetManager = AppWidgetManager.getInstance(requireContext())
-        val componentName = ComponentName(requireContext(), TaskWidgetProvider::class.java)
-        appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetManager.getAppWidgetIds(componentName), R.id.task_list_view)
+        val widgetComponent = ComponentName(requireContext(), TaskWidgetProvider::class.java)
+        val ids = appWidgetManager.getAppWidgetIds(widgetComponent)
+        appWidgetManager.notifyAppWidgetViewDataChanged(ids, R.id.task_list_view)
+        appWidgetManager.updateAppWidget(widgetComponent, null)
     }
 }

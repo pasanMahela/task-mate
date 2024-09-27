@@ -3,7 +3,9 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
 
     <application
         android:allowBackup="true"
@@ -27,6 +29,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="false" />
+        <receiver android:name=".TaskReminderReceiver" />
         <activity
             android:name=".LoginActivity"
             android:exported="false" />
